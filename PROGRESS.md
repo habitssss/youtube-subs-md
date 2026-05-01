@@ -73,3 +73,37 @@
 ### 下一步
 
 实现 `videos.py`：`yt-dlp` 封装，频道/播放列表/单视频解析。
+
+---
+
+## Commit 3: videos.py — yt-dlp 封装 (2026-05-01)
+
+### 范围
+
+- `list_recent_videos(url, limit)`: flat extraction，自动处理裸频道 URL → Videos tab
+- `hydrate_video(video_id)`: 单视频完整 metadata 提取（拿 `upload_date` 等）
+- `metadata_from_entry(entry, source)`: hydrate 失败时的 fallback 构造器
+- 三个 dataclass: `VideoEntry` / `VideoMetadata` / `SourceInfo`
+- 两个异常: `VideoListError` / `VideoHydrateError`
+
+### 关键决策
+
+- **复用规格 §17 验证脚本的成熟逻辑**：`_is_channel_tab_listing` + `_videos_tab_url`
+  自动跳转裸频道 URL 到 `/videos` tab
+- **hydrate 失败必须可降级**：实测 YouTube 当前会对 yt-dlp 的完整 extract 触发
+  "Sign in to confirm you're not a bot" 反爬。此时使用 `metadata_from_entry`
+  保证仍可生成 Markdown（只是文件名日期变 `0000-00-00`）
+- flat extraction 已包含 `id` + `title`，频道级 `uploader` / `channel_id` 也能拿到，
+  所以即便 hydrate 全失败，主要功能仍可工作
+
+### 验证
+
+- 模块 import 通过
+- 实跑 `list_recent_videos('https://www.youtube.com/@lexfridman', 2)`：
+  - SourceInfo 正确解析 (uploader='Lex Fridman', channel_id='UCSHZ...')
+  - 返回 2 条视频，含 id 与 title
+- `hydrate_video` 对该视频失败（YouTube 反爬），符合预期 → CLI 层将 fallback
+
+### 下一步
+
+实现 `transcripts.py`：`youtube-transcript-api` 封装。
