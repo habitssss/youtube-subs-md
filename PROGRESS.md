@@ -1,0 +1,46 @@
+# 任务进度记录
+
+记录每次 commit 的目标、范围和验证情况。
+
+## 实施计划总览
+
+按依赖顺序分多次 commit 推进：
+
+1. **项目初始化** —— uv 项目骨架、依赖声明、CLI 占位入口
+2. **纯函数模块** —— `filenames` / `text_cleaning` / `markdown`
+3. **网络模块：videos** —— `yt-dlp` 封装，频道/播放列表/单视频解析
+4. **网络模块：transcripts** —— `youtube-transcript-api` 封装
+5. **CLI 主流程** —— 串联所有模块、参数解析、summary 输出
+6. **手动验证 & 微调** —— 单视频 / 播放列表 / 频道三类场景
+
+每次 commit 完成后，在本文件追加一节，记录范围、关键决策和验证结果。
+
+---
+
+## Commit 1: 项目初始化 (2026-05-01)
+
+### 范围
+
+- `uv init --package youtube-subs-md --python ">=3.10"` 创建项目骨架
+- 在 `pyproject.toml` 声明依赖：`yt-dlp` / `youtube-transcript-api` / `typer` / `rich`
+- 配置 `[project.scripts]` 入口指向 `youtube_subs_md.cli:app`
+- 创建 `cli.py` 占位实现，保证 `uv run youtube-subs-md` 可执行
+- 编写 `README.md` 和本进度文档
+
+### 关键决策（来自规格对齐）
+
+1. **跳过判定用 video_id glob 匹配**（`*[<video_id>].md`），与日期/标题解耦，
+   避免"为了判断跳过先 hydrate"的悖论
+2. **频道目录名**优先 `uploader`，fallback `channel_id`，做文件名清洗
+3. **段落分割**：MVP 先全部合并为一段，后续优化
+4. **自动字幕去重**：MVP 仅做完全相同的相邻去重，后续考虑后缀-前缀重叠合并
+5. Python `>=3.10`；不写 `_summary.json`；语言变体（`en-US`/`en-GB`）归一为 `en`；hydrate 串行 + rich 进度条
+
+### 验证
+
+- `uv sync` 能拉取依赖
+- `uv run youtube-subs-md` 能输出占位提示
+
+### 下一步
+
+实现纯函数模块 `filenames.py` / `text_cleaning.py` / `markdown.py`。
