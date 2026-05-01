@@ -44,3 +44,32 @@
 ### 下一步
 
 实现纯函数模块 `filenames.py` / `text_cleaning.py` / `markdown.py`。
+
+---
+
+## Commit 2: 纯函数模块 (2026-05-01)
+
+### 范围
+
+- `filenames.py`: 字符清洗、日期格式化、文件名构造、`find_existing_for_video_id`（用 `*[VIDEOID].md` glob）
+- `text_cleaning.py`: 标签剥离、空白规整、相邻去重、合并为单段
+- `markdown.py`: `VideoMeta` dataclass + `render()` 固定格式
+
+### 关键决策
+
+- `sanitize()` 在结果只剩标点/分隔符时回退到 `fallback`（避免目录名变成 `-`）
+- 中文等 CJK 字符通过 `\w` + `\u4e00-\u9fff` 正则白名单保留
+- `format_upload_date(None|invalid) -> "0000-00-00"`，保持文件名格式稳定
+- `find_existing_for_video_id` 使用 `glob("*[[]VIDEOID[]].md")` 转义中括号
+
+### 验证
+
+- 内联 Python 脚本对所有公开函数做 smoke test：
+  - 文件名构造、CJK / emoji / 非法字符 / 空标题
+  - glob 命中已存在文件，未命中返回 None
+  - text_cleaning 正确去除 `<c>` 标签和相邻重复
+  - markdown 输出符合规格
+
+### 下一步
+
+实现 `videos.py`：`yt-dlp` 封装，频道/播放列表/单视频解析。
