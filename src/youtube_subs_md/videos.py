@@ -17,6 +17,29 @@ from typing import Any
 import yt_dlp
 
 
+class _NullLogger:
+    """提供给 yt-dlp 的静默 logger，避免错误信息直接打到 stderr。
+
+    yt-dlp 即使设置 ``quiet=True``，部分 ERROR 日志仍会通过默认 logger 输出。
+    使用此 logger 后，错误只会通过 :func:`yt_dlp.YoutubeDL.extract_info` 的
+    返回值（None）或异常体现，由调用方决定如何展示给用户。
+    """
+
+    def debug(self, _msg: str) -> None: ...
+    def info(self, _msg: str) -> None: ...
+    def warning(self, _msg: str) -> None: ...
+    def error(self, _msg: str) -> None: ...
+
+
+_BASE_OPTS: dict[str, Any] = {
+    "quiet": True,
+    "no_warnings": True,
+    "skip_download": True,
+    "ignoreerrors": True,
+    "logger": _NullLogger(),
+}
+
+
 @dataclass(frozen=True)
 class VideoEntry:
     """flat extraction 阶段返回的轻量条目，仅保证有 id 和可用 url。"""
@@ -118,10 +141,7 @@ def list_recent_videos(url: str, limit: int) -> tuple[SourceInfo, list[VideoEntr
         :class:`VideoListError` 当 yt-dlp 无法解析或返回空。
     """
     ydl_opts: dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "ignoreerrors": True,
+        **_BASE_OPTS,
         "extract_flat": "in_playlist",
         "playlistend": limit,
     }
@@ -179,10 +199,7 @@ def hydrate_video(video_id: str) -> VideoMetadata:
         :class:`VideoHydrateError` 当视频不可访问、被删除或 yt-dlp 失败时。
     """
     ydl_opts: dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "ignoreerrors": True,
+        **_BASE_OPTS,
         "noplaylist": True,
     }
     url = _video_url(video_id)

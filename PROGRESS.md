@@ -142,3 +142,41 @@
 ### 下一步
 
 实现 `cli.py` 主流程：串联各模块、参数解析、跳过判定、summary 输出。
+
+---
+
+## Commit 5: cli.py 主流程 + 输出降噪 (2026-05-01)
+
+### 范围
+
+- `cli.py` 完整实现：参数解析、URL 解析、目录构造、逐视频处理、summary
+- `RunSummary` dataclass 收集计数与失败明细
+- 单视频处理流程：跳过已存在 → hydrate (失败降级) → fetch transcript → 清洗 → 渲染 → 写文件
+- `--dry-run` 仅列视频不下载；`--overwrite` 覆盖现有同 video_id 文件
+- `videos.py` 新增 `_BASE_OPTS` + `_NullLogger` 静默 yt-dlp 错误输出
+- `transcripts.py` 新增 `_short()` 截取异常首行非空摘要
+- `cli.py` 新增 `_short_exc()` 同上语义，并对所有用户/异常文本调用 `rich.markup.escape`
+
+### 关键决策与坑
+
+- **Rich markup 与 video_id 冲突**：`[iKx3gAODybU]` 会被 Rich 解析为不存在的 style
+  并被吞掉。所有出现 video_id 的输出必须 `escape()`。
+- **CLI 状态前缀**：`[skip existing]` / `[failed]` 等同样需要 escape，但要保留外层
+  颜色 markup → 写法 `[yellow]{escape('[skip existing]')}[/]`
+- **yt-dlp 默认会向 stderr 直接打印 ERROR**：用自定义 `_NullLogger` 注入到 `ydl_opts['logger']`
+- **异常消息可能多行多页**：`_short_exc` 只取首行非空摘要 + 200 字符上限
+- **hydrate 全失败仍出 markdown**：通过 `metadata_from_entry` 降级，仅文件名日期变 `0000-00-00`
+
+### 验证
+
+- `--help` 输出符合规格
+- `--dry-run` 正确显示 3 个视频 ID 与标题（修 escape 前会丢失）
+- 实跑 `--limit 1`：当前 IP 被 YouTube 封锁
+  → `[hydrate fallback]` + `[failed]` 标签均正确显示
+  → exit 0，summary 完整打印 (Processed=1, Failed=1)
+- 整体流程 fail-soft 验证通过
+
+### 下一步
+
+加跑成熟环境（如能获得未被封锁的网络）做端到端验证；或现状下补充
+README "Known Issues" 说明 IP/反爬限制。

@@ -36,6 +36,18 @@ class TranscriptFetchError(RuntimeError):
     """请求被阻止 / 视频不可访问 / 其他底层异常。"""
 
 
+def _short(exc: BaseException) -> str:
+    """提取异常的首行非空摘要，避免多行 traceback 信息污染上层日志。"""
+    text = str(exc).strip()
+    if not text:
+        return exc.__class__.__name__
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return exc.__class__.__name__
+
+
 def _snippet_text(snippet: Any) -> str:
     """兼容 dict 和对象两种 snippet 表示。"""
     if isinstance(snippet, dict):
@@ -61,7 +73,7 @@ def fetch_english_transcript(video_id: str) -> FetchedTranscript:
         # 区分"无字幕"和"请求失败"困难，这里全部归类为请求异常；
         # NoEnglishTranscript 留给明确没找到英文条目的情况。
         raise TranscriptFetchError(
-            f"list transcripts failed for {video_id}: {exc}"
+            f"list transcripts failed for {video_id}: {_short(exc)}"
         ) from exc
 
     selected = None
@@ -89,7 +101,7 @@ def fetch_english_transcript(video_id: str) -> FetchedTranscript:
         fetched = selected.fetch()
     except Exception as exc:
         raise TranscriptFetchError(
-            f"fetch transcript failed for {video_id}: {exc}"
+            f"fetch transcript failed for {video_id}: {_short(exc)}"
         ) from exc
 
     # fetched 可能是 FetchedTranscript-like 对象 (含 .snippets) 或可迭代 snippet 列表
