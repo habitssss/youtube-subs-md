@@ -107,3 +107,38 @@
 ### 下一步
 
 实现 `transcripts.py`：`youtube-transcript-api` 封装。
+
+---
+
+## Commit 4: transcripts.py — 字幕获取 (2026-05-01)
+
+### 范围
+
+- `fetch_english_transcript(video_id) -> FetchedTranscript`
+- 优先人工字幕，fallback 自动字幕，都没有则 `NoEnglishTranscript`
+- 网络/反爬错误归类为 `TranscriptFetchError`
+- 兼容新旧 `youtube-transcript-api` 返回结构（`.snippets` 对象 vs `list[dict]`）
+
+### 关键决策
+
+- 三种错误状态明确区分，便于 CLI 显示不同 summary 类别：
+  - `NoEnglishTranscript`: 跳过该视频，记入 "Skipped no subtitles"
+  - `TranscriptFetchError`: 网络/反爬，记入 "Failed"
+  - 成功: 返回结构化 snippet text 列表
+- snippet 对象与 dict 都用 `_snippet_text` 兼容
+
+### 验证
+
+- 实跑 `fetch_english_transcript('iKx3gAODybU')`：当前 IP 被 YouTube 屏蔽，
+  正确抛出 `TranscriptFetchError` ✓ 错误分类符合预期
+- 这进一步验证 CLI 必须能逐视频 fail-soft，整体流程不中断
+
+### 已知环境问题
+
+当前测试 IP 被 YouTube 阻断（反爬 + IP block），影响 hydrate 与 transcript fetch
+两个真实网络路径。flat extraction（仅获取视频列表）目前仍可工作。
+**这是网络环境问题而非代码问题**，CLI 必须在这种环境下也能优雅退出并输出 summary。
+
+### 下一步
+
+实现 `cli.py` 主流程：串联各模块、参数解析、跳过判定、summary 输出。
