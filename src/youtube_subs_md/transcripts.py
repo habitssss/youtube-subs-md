@@ -1,21 +1,29 @@
-"""``youtube-transcript-api`` 封装：按 video_id 获取英文字幕。
+"""字幕提取：从 yt-dlp 返回的 caption 字典中选英文轨道并下载解析。
 
-字幕优先级：
+为什么不再使用 ``youtube-transcript-api``：
+
+- 该库直接调用 YouTube 的非公开 timedtext 接口，无法复用浏览器 Cookie，
+  在被 YouTube 标记的 IP 上几乎一定遭遇 ``RequestBlocked``。
+- yt-dlp 已经能拿到 ``automatic_captions`` 中的 ``json3`` 直链，
+  通过 :meth:`yt_dlp.YoutubeDL.urlopen` 下载即可复用同一份 Cookie 与 UA。
+- 因此 transcripts 模块改为消费 :class:`videos.VideoData` 已经持有的字幕字典。
+
+字幕优先级保持不变：
 
 1. 人工英文字幕 (``manual``)
 2. 自动英文字幕 (``auto-generated``)
 3. 都没有 → 抛出 :class:`NoEnglishTranscript`
-
-返回结果 :class:`FetchedTranscript` 包含原始 snippet text 列表与来源标记，
-供上层调用 ``text_cleaning`` / ``markdown`` 模块进一步处理。
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
-from youtube_transcript_api import YouTubeTranscriptApi
+import yt_dlp
+
+from .videos import VideoData, make_base_opts
 
 
 @dataclass(frozen=True)
@@ -33,96 +41,155 @@ class NoEnglishTranscript(RuntimeError):
 
 
 class TranscriptFetchError(RuntimeError):
-    """请求被阻止 / 视频不可访问 / 其他底层异常。"""
+    """下载或解析字幕过程中失败。"""
 
 
-def _short(exc: BaseException) -> str:
-    """提取异常的首行非空摘要，避免多行 traceback 信息污染上层日志。"""
-    text = str(exc).strip()
-    if not text:
-        return exc.__class__.__name__
-    for line in text.splitlines():
-        line = line.strip()
-        if line:
-            return line
-    return exc.__class__.__name__
+# yt-dlp 在 caption 字典里支持多种格式，按优先级选最便于解析的
+_PREFERRED_FORMATS = ("json3", "srv3", "srv2", "srv1", "vtt")
 
 
-def _snippet_text(snippet: Any) -> str:
-    """兼容 dict 和对象两种 snippet 表示。"""
-    if isinstance(snippet, dict):
-        return str(snippet.get("text") or "")
-    return str(getattr(snippet, "text", ""))
+def _pick_english_track(
+    captions: dict[str, list[dict[str, Any]]],
+) -> tuple[str, dict[str, Any]] | None:
+    """从字幕字典里挑英文轨道。
+
+    返回 ``(language_code, format_dict)``；找不到返回 ``None``。
+    优先精确匹配 ``en``，再考虑 ``en-US`` / ``en-GB`` 等变体。
+    """
+    if not captions:
+        return None
+
+    # 1. 精确 "en"
+    if "en" in captions:
+        return "en", _pick_format(captions["en"])
+
+    # 2. 任何以 "en" 开头的变体
+    for code, formats in captions.items():
+        if code.lower().split("-", 1)[0] == "en":
+            return code, _pick_format(formats)
+
+    return None
 
 
-def fetch_english_transcript(video_id: str) -> FetchedTranscript:
-    """获取指定视频的英文字幕。
+def _pick_format(formats: list[dict[str, Any]]) -> dict[str, Any]:
+    """按 ``_PREFERRED_FORMATS`` 顺序选最易解析的字幕格式条目。"""
+    by_ext = {f.get("ext"): f for f in formats if f.get("url")}
+    for ext in _PREFERRED_FORMATS:
+        if ext in by_ext:
+            return by_ext[ext]
+    # fallback: 第一个有 url 的
+    for f in formats:
+        if f.get("url"):
+            return f
+    raise TranscriptFetchError("no usable caption format with URL")
 
-    参数:
-        video_id: YouTube 视频 ID。
+
+def _parse_json3(data: bytes) -> list[str]:
+    """解析 YouTube json3 字幕，返回 snippet 文本列表（不含时间戳）。"""
+    obj = json.loads(data)
+    events = obj.get("events") or []
+    snippets: list[str] = []
+    for event in events:
+        segs = event.get("segs") or []
+        text = "".join(s.get("utf8", "") for s in segs)
+        # json3 中常见 "\n" 单独成 segment，去掉并保留为段间空白
+        text = text.replace("\n", " ").strip()
+        if text:
+            snippets.append(text)
+    return snippets
+
+
+def _parse_vtt(data: bytes) -> list[str]:
+    """非常简化的 VTT fallback 解析：剥离时间戳与序号、保留文本行。"""
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    snippets: list[str] = []
+    buf: list[str] = []
+    for line in lines:
+        s = line.strip()
+        # 跳过空行 / 头部 / 时间戳 / cue id
+        if not s:
+            if buf:
+                snippets.append(" ".join(buf).strip())
+                buf = []
+            continue
+        if s.upper().startswith("WEBVTT") or s.startswith("NOTE"):
+            continue
+        if "-->" in s:
+            continue
+        if s.isdigit():
+            continue
+        # 简单去掉常见标签 <c> </c> <00:00:00.000>
+        import re
+
+        s = re.sub(r"<[^>]+>", "", s)
+        if s:
+            buf.append(s)
+    if buf:
+        snippets.append(" ".join(buf).strip())
+    return snippets
+
+
+def fetch_english_transcript(
+    video_data: VideoData,
+    *,
+    cookies_from_browser: str | None = None,
+) -> FetchedTranscript:
+    """从 :class:`VideoData` 中选英文字幕并下载。
+
+    优先 manual EN，其次 auto-generated EN；下载所选 URL 后按 ``ext`` 解析。
 
     异常:
-        :class:`NoEnglishTranscript` 当人工和自动英文字幕都不存在时。
-        :class:`TranscriptFetchError` 当 list/fetch 调用失败（网络/反爬/视频不可达）。
+        :class:`NoEnglishTranscript` 当 manual / auto 都无英文轨道。
+        :class:`TranscriptFetchError` 当下载或解析过程出错。
     """
-    api = YouTubeTranscriptApi()
+    video_id = video_data.metadata.id
 
-    try:
-        transcript_list = api.list(video_id)
-    except Exception as exc:
-        # 区分"无字幕"和"请求失败"困难，这里全部归类为请求异常；
-        # NoEnglishTranscript 留给明确没找到英文条目的情况。
-        raise TranscriptFetchError(
-            f"list transcripts failed for {video_id}: {_short(exc)}"
-        ) from exc
+    # 1. manual EN 优先
+    pick = _pick_english_track(video_data.subtitles)
+    source = "manual"
 
-    selected = None
-    source: str | None = None
+    # 2. fallback 到 auto-generated
+    if pick is None:
+        pick = _pick_english_track(video_data.automatic_captions)
+        source = "auto-generated"
 
-    # 优先人工字幕
-    try:
-        selected = transcript_list.find_manually_created_transcript(["en"])
-        source = "manual"
-    except Exception:
-        selected = None
-
-    # fallback 到自动字幕
-    if selected is None:
-        try:
-            selected = transcript_list.find_generated_transcript(["en"])
-            source = "auto-generated"
-        except Exception:
-            selected = None
-
-    if selected is None or source is None:
+    if pick is None:
         raise NoEnglishTranscript(f"no English transcript for {video_id}")
 
+    language_code, fmt = pick
+    url = fmt.get("url")
+    ext = (fmt.get("ext") or "").lower()
+    if not url:
+        raise TranscriptFetchError(f"caption track without URL for {video_id}")
+
+    # 3. 用 yt-dlp 的 urlopen 下载，保证复用同一份 Cookie 与 UA
+    ydl_opts = {**make_base_opts(cookies_from_browser), "noplaylist": True}
     try:
-        fetched = selected.fetch()
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            data = ydl.urlopen(url).read()
     except Exception as exc:
         raise TranscriptFetchError(
-            f"fetch transcript failed for {video_id}: {_short(exc)}"
+            f"download caption failed for {video_id}: {exc}"
         ) from exc
 
-    # fetched 可能是 FetchedTranscript-like 对象 (含 .snippets) 或可迭代 snippet 列表
-    snippets_obj = getattr(fetched, "snippets", None)
-    if snippets_obj is None:
-        # 旧版 API 直接返回 list[dict]
-        snippets_iter = fetched
-    else:
-        snippets_iter = snippets_obj
-
-    snippet_texts = [_snippet_text(s) for s in snippets_iter]
-
-    language_code = (
-        getattr(fetched, "language_code", None)
-        or getattr(selected, "language_code", None)
-        or "en"
-    )
+    # 4. 按格式解析
+    try:
+        if ext in ("json3", "srv3"):
+            # srv3 与 json3 在新版 yt-dlp 中实际同源，按 json3 解析
+            snippets = _parse_json3(data)
+        elif ext == "vtt":
+            snippets = _parse_vtt(data)
+        else:
+            # 其它 srv1/srv2 是 XML/简化文本，做最朴素的兜底
+            snippets = _parse_vtt(data)  # 通常仍能拿到大部分文本
+    except Exception as exc:
+        raise TranscriptFetchError(
+            f"parse caption failed for {video_id} (ext={ext}): {exc}"
+        ) from exc
 
     return FetchedTranscript(
         video_id=video_id,
-        language_code=str(language_code),
+        language_code=language_code,
         source=source,
-        snippets=snippet_texts,
+        snippets=snippets,
     )

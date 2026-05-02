@@ -180,3 +180,68 @@
 
 加跑成熟环境（如能获得未被封锁的网络）做端到端验证；或现状下补充
 README "Known Issues" 说明 IP/反爬限制。
+
+---
+
+## Commit 6: 切换到 yt-dlp + Chrome cookies 架构 (2026-05-02)
+
+### 触发原因
+
+5 月 1 日实测发现：
+- yt-dlp 完整 extract 触发 "Sign in to confirm you're not a bot"
+- youtube-transcript-api 触发 RequestBlocked
+
+后续 web 调研 + 11 种组合实验定位到突破口：**Chrome cookies-from-browser
++ `process=False`** 可以一次性拿到 metadata + 字幕 URL。
+youtube-transcript-api 因为不能复用浏览器 Cookie，无救。
+
+### 范围
+
+- `videos.py` 重构：
+  - 新增 `make_base_opts(cookies_from_browser)` 工厂函数
+  - 新增 `VideoData` dataclass（metadata + subtitles + automatic_captions）
+  - 新增 `fetch_video_data(video_id, cookies_from_browser)`
+    一次 `extract_info(process=False)` 同时返回元数据和字幕 URL
+  - 删除原来注定失败的 `hydrate_video`，保留 `metadata_from_entry` 作为 fallback
+  - `list_recent_videos` 也接受 `cookies_from_browser`
+- `transcripts.py` 完全重写：
+  - 不再依赖 `youtube-transcript-api`
+  - `fetch_english_transcript(video_data, cookies_from_browser)` 接受
+    `VideoData`，从其字幕字典中挑英文轨道
+  - 通过 `yt_dlp.YoutubeDL.urlopen` 下载 `json3` 字幕（复用同一份 Cookie）
+  - 自实现 `_parse_json3` + `_parse_vtt` 两个解析器
+- `cli.py`：
+  - `_process_one` 改用新的 `fetch_video_data` + 新签名的 `fetch_english_transcript`
+  - 暂时硬编码 `cookies_from_browser="chrome"`，下个 commit 换成 CLI 参数
+
+### 关键决策
+
+- **每个视频只做一次完整 extract**：metadata 与 caption URL 同源，避免重复网络请求
+- **`process=False`**：跳过 yt-dlp 内部的 format 选择/字幕下载流程，
+  防止 "Requested format is not available" 误报，且更快
+- **字幕格式优先级**：`json3` > `srv3` > `srv2` > `srv1` > `vtt`，json3 解析最可靠
+- **Cookie 来源**：MVP 默认 Chrome；下一 commit 暴露为 CLI 参数
+
+### 验证
+
+`uv run youtube-subs-md "https://www.youtube.com/@t3dotgg" --limit 2 --out /tmp/yt-test`：
+
+```
+Resolving: https://www.youtube.com/@t3dotgg
+Channel: Theo - t3․gg → /tmp/yt-test/Theo - t3․gg
+Videos: 2
+[ok] Seriously, Anthropic?? [J8O9LLpJNrg] → 2026-05-01 - ...md
+[ok] I give up. [R7ex-Gt8dtw] → 2026-04-30 - I give up [R7ex-Gt8dtw].md
+
+Processed=2, Downloaded=2, Failed=0
+```
+
+✅ 文件名格式符合规格（含日期 + 标题 + video_id）
+✅ Markdown header 完整（URL/Channel/Published/Subtitle 字段齐全）
+✅ Subtitle 来源正确标注 `en, auto-generated`
+✅ Transcript 文本干净，无时间戳，正常段落
+
+### 下一步
+
+将 `--cookies-from-browser` 暴露为 CLI 参数；更新 README；
+可选地从 `pyproject.toml` 删除 `youtube-transcript-api` 依赖。

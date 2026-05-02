@@ -1,17 +1,19 @@
-"""yt-dlp 封装：解析频道/播放列表/单视频 URL，获取视频列表与元数据。
+"""yt-dlp 封装：解析频道/播放列表/单视频 URL，获取视频列表与完整数据。
 
-设计要点（来自规格 §17 技术验证结果）:
+设计要点（融合规格 §17 与 commit 6 的反爬绕过实测）:
 
 1. 使用 ``extract_flat='in_playlist'`` 快速拿到视频 ID 列表，避免逐个完整解析。
 2. 裸频道 URL（如 ``https://www.youtube.com/@handle``）会被 yt-dlp 解析为 tab 列表
    （Videos/Live/Shorts/Playlists），需要识别后跳转到 ``Videos`` tab。
-3. flat extraction 不包含 ``upload_date`` 等字段；正式流程在过滤已存在文件后，
-   再对剩余视频调用 :func:`hydrate_video` 补全元数据。
+3. **YouTube 当前会对完整 extract 触发 bot 检测**：必须传 ``cookiesfrombrowser``
+   （读取已登录浏览器的 Cookie）才能拿到 metadata 和 caption URL。
+4. 单次完整 extract 同时返回 metadata + ``subtitles`` + ``automatic_captions``，
+   :func:`fetch_video_data` 因此只做一次网络往返就足够上层渲染 Markdown。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import yt_dlp
@@ -40,6 +42,23 @@ _BASE_OPTS: dict[str, Any] = {
 }
 
 
+def make_base_opts(cookies_from_browser: str | None = None) -> dict[str, Any]:
+    """构造一份 yt-dlp 选项基线。
+
+    参数:
+        cookies_from_browser: 浏览器名（``chrome`` / ``firefox`` / ``safari`` ...）。
+            为 ``None`` 时不附加 cookies，仅适合未触发反爬的简单场景。
+
+    返回:
+        新的字典副本，可被各调用点继续 ``{**base, ...}`` 扩展。
+    """
+    opts = dict(_BASE_OPTS)
+    if cookies_from_browser:
+        # yt-dlp 接受 (browser, profile, keyring, container) 元组
+        opts["cookiesfrombrowser"] = (cookies_from_browser,)
+    return opts
+
+
 @dataclass(frozen=True)
 class VideoEntry:
     """flat extraction 阶段返回的轻量条目，仅保证有 id 和可用 url。"""
@@ -51,7 +70,7 @@ class VideoEntry:
 
 @dataclass(frozen=True)
 class VideoMetadata:
-    """完整 metadata，由 :func:`hydrate_video` 返回。"""
+    """完整 metadata，由 :func:`fetch_video_data` 暴露给上层。"""
 
     id: str
     url: str
@@ -60,6 +79,19 @@ class VideoMetadata:
     channel_id: str | None
     upload_date: str | None  # YYYYMMDD
     duration: int | None
+
+
+@dataclass(frozen=True)
+class VideoData:
+    """单视频完整数据：metadata + 原始 caption 字典。
+
+    ``subtitles`` / ``automatic_captions`` 直接保留 yt-dlp 返回的格式
+    （``{lang: [{ext, url, ...}, ...]}``），由 transcripts 模块继续选择。
+    """
+
+    metadata: VideoMetadata
+    subtitles: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    automatic_captions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -121,7 +153,12 @@ class VideoListError(RuntimeError):
     """yt-dlp 解析输入 URL 失败时抛出。"""
 
 
-def list_recent_videos(url: str, limit: int) -> tuple[SourceInfo, list[VideoEntry]]:
+def list_recent_videos(
+    url: str,
+    limit: int,
+    *,
+    cookies_from_browser: str | None = None,
+) -> tuple[SourceInfo, list[VideoEntry]]:
     """解析输入 URL，返回最多 ``limit`` 个视频条目。
 
     支持的输入：
@@ -133,15 +170,17 @@ def list_recent_videos(url: str, limit: int) -> tuple[SourceInfo, list[VideoEntr
     参数:
         url: YouTube 链接。
         limit: 最多返回多少个视频。
+        cookies_from_browser: 可选，浏览器名（用于绕过 bot 检测）。
+            实测 flat extraction 通常不触发反爬，因此默认 ``None``。
 
     返回:
-        ``(source_info, entries)`` 元组。``source_info`` 用于构造输出目录名。
+        ``(source_info, entries)`` 元组。
 
     异常:
         :class:`VideoListError` 当 yt-dlp 无法解析或返回空。
     """
     ydl_opts: dict[str, Any] = {
-        **_BASE_OPTS,
+        **make_base_opts(cookies_from_browser),
         "extract_flat": "in_playlist",
         "playlistend": limit,
     }
@@ -185,34 +224,46 @@ def list_recent_videos(url: str, limit: int) -> tuple[SourceInfo, list[VideoEntr
     return source, videos
 
 
-class VideoHydrateError(RuntimeError):
-    """单个视频 hydrate metadata 失败时抛出。"""
+class VideoFetchError(RuntimeError):
+    """单个视频完整数据获取失败时抛出。"""
 
 
-def hydrate_video(video_id: str) -> VideoMetadata:
-    """对单个视频做完整 metadata 提取，主要为了拿 ``upload_date``。
+def fetch_video_data(
+    video_id: str,
+    *,
+    cookies_from_browser: str | None = None,
+) -> VideoData:
+    """单视频完整数据：metadata + 原始字幕字典。
+
+    一次 ``extract_info(process=False)`` 即同时返回视频元信息与字幕 URL，
+    由 :mod:`transcripts` 后续选择并下载。
 
     参数:
         video_id: YouTube 视频 ID（11 位字符串）。
+        cookies_from_browser: 浏览器名（如 ``chrome``）。当前 YouTube 反爬
+            通常要求此项；不传时极易遇到 "Sign in to confirm you're not a bot"。
 
     异常:
-        :class:`VideoHydrateError` 当视频不可访问、被删除或 yt-dlp 失败时。
+        :class:`VideoFetchError` 当视频不可访问、被删除或 yt-dlp 失败时。
     """
     ydl_opts: dict[str, Any] = {
-        **_BASE_OPTS,
+        **make_base_opts(cookies_from_browser),
         "noplaylist": True,
+        # process=False 仍可能触发 format 选择；保险起见显式置空
+        "format": None,
     }
     url = _video_url(video_id)
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            # process=False: 跳过格式选择/字幕下载等耗时步骤，只取原始 info
+            info = ydl.extract_info(url, download=False, process=False)
     except Exception as exc:
-        raise VideoHydrateError(f"hydrate failed for {video_id}: {exc}") from exc
+        raise VideoFetchError(f"fetch failed for {video_id}: {exc}") from exc
 
     if not info:
-        raise VideoHydrateError(f"hydrate returned no info for {video_id}")
+        raise VideoFetchError(f"fetch returned no info for {video_id}")
 
-    return VideoMetadata(
+    metadata = VideoMetadata(
         id=info.get("id") or video_id,
         url=info.get("webpage_url") or url,
         title=info.get("title") or "Untitled",
@@ -222,13 +273,19 @@ def hydrate_video(video_id: str) -> VideoMetadata:
         duration=info.get("duration"),
     )
 
+    return VideoData(
+        metadata=metadata,
+        subtitles=dict(info.get("subtitles") or {}),
+        automatic_captions=dict(info.get("automatic_captions") or {}),
+    )
+
 
 def metadata_from_entry(entry: VideoEntry, source: SourceInfo) -> VideoMetadata:
     """从 flat extract 的轻量条目 + 源信息构造 fallback metadata。
 
-    用途：当 :func:`hydrate_video` 因 YouTube 反爬等原因失败时，
-    仍可使用 flat extraction 已有的 title + 频道级 uploader 继续生成 Markdown，
-    只是文件名日期前缀会是 ``0000-00-00``。
+    用途：当 :func:`fetch_video_data` 失败时，仍可以基于 flat extraction
+    已有的 title 与频道级 uploader 信息生成 Markdown，
+    只是文件名日期前缀会变成 ``0000-00-00``，且没有字幕。
     """
     return VideoMetadata(
         id=entry.id,

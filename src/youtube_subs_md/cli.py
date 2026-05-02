@@ -100,14 +100,17 @@ def _process_one(
     channel_dir: Path,
     overwrite: bool,
     summary: RunSummary,
+    *,
+    cookies_from_browser: str | None,
 ) -> None:
-    """处理单个视频：hydrate → fetch → clean → render → write。
+    """处理单个视频：fetch (metadata + caption URLs) → fetch transcript → render → write。
 
     所有可恢复错误都在此函数内部捕获并写入 summary，确保不会中断整体流程。
     """
     # label 同时用于带样式的 console.print 与纯文本失败明细，
     # 这里预先转义防止 Rich 将 video_id 中的方括号当作 markup
     label = escape(f"{entry.title or entry.id} [{entry.id}]")
+    raw_label = f"{entry.title or entry.id} [{entry.id}]"
 
     # 1. 跳过已存在
     existing = filenames.find_existing_for_video_id(channel_dir, entry.id)
@@ -116,18 +119,26 @@ def _process_one(
         console.print(f"[yellow]{escape('[skip existing]')}[/] {label}")
         return
 
-    # 2. hydrate metadata（失败则降级到 flat 数据）
+    # 2. 一次性拿到 metadata + caption URLs（需要 Chrome cookies 绕过 bot 检测）
     try:
-        video_meta = videos.hydrate_video(entry.id)
-    except videos.VideoHydrateError as exc:
-        console.print(
-            f"[dim]{escape('[hydrate fallback]')}[/] {label}: {escape(_short_exc(exc))}"
+        video_data = videos.fetch_video_data(
+            entry.id, cookies_from_browser=cookies_from_browser
         )
-        video_meta = videos.metadata_from_entry(entry, source)
+    except videos.VideoFetchError as exc:
+        # 元数据拿不到 → 没法继续做字幕（caption URL 也在这一步返回）
+        summary.failed += 1
+        short = _short_exc(exc)
+        summary.failures.append(f"{raw_label}: {short}")
+        console.print(f"[red]{escape('[failed fetch]')}[/] {label}: {escape(short)}")
+        return
 
-    # 3. 获取字幕
+    video_meta = video_data.metadata
+
+    # 3. 从已拿到的字幕字典里选英文 + 下载
     try:
-        fetched = transcripts.fetch_english_transcript(entry.id)
+        fetched = transcripts.fetch_english_transcript(
+            video_data, cookies_from_browser=cookies_from_browser
+        )
     except transcripts.NoEnglishTranscript:
         summary.skipped_no_subtitles += 1
         summary.no_subtitle_videos.append(label)
@@ -135,8 +146,6 @@ def _process_one(
         return
     except transcripts.TranscriptFetchError as exc:
         summary.failed += 1
-        # failures 列表是纯文本最终打印用，使用未转义的原标签更易读
-        raw_label = f"{entry.title or entry.id} [{entry.id}]"
         short = _short_exc(exc)
         summary.failures.append(f"{raw_label}: {short}")
         console.print(f"[red]{escape('[failed]')}[/] {label}: {escape(short)}")
@@ -208,6 +217,10 @@ def main(
     """主命令：下载频道最近 N 个视频的英文字幕为 Markdown。"""
     summary = RunSummary()
 
+    # commit 6: YouTube 当前对完整 extract 必须使用 cookie 才能绕过 bot 检测；
+    # 暂时硬编码为 Chrome，下一个 commit 会改成 CLI 参数。
+    cookies_from_browser = "chrome"
+
     console.print(f"[bold]Resolving:[/] {escape(url)}")
     try:
         source, entries = videos.list_recent_videos(url, limit)
@@ -253,7 +266,14 @@ def main(
         for entry in entries:
             summary.processed += 1
             try:
-                _process_one(entry, source, channel_dir, overwrite, summary)
+                _process_one(
+                    entry,
+                    source,
+                    channel_dir,
+                    overwrite,
+                    summary,
+                    cookies_from_browser=cookies_from_browser,
+                )
             except Exception as exc:
                 # 兜底：任何未预期异常都不应中断整体流程
                 summary.failed += 1
