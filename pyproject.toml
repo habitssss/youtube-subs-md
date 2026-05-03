@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Download recent YouTube channel videos' English subtitles and save as clean Markdown."
 readme = "README.md"
 authors = [
-    { name = "habits", email = "1021869329@qq.com" }
+    { name = "habitssss", email = "48110386+habitssss@users.noreply.github.com" }
 ]
 requires-python = ">=3.10"
 dependencies = [
