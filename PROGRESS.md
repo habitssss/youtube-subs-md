@@ -282,3 +282,43 @@ Processed=2, Downloaded=2, Failed=0
 | 区分 manual / auto-generated | ✅ |
 
 MVP 完成。后续可考虑加 `--player-client` / `--proxy` / PO Token 等扩展。
+
+---
+
+## Commit 8: 隐私清理 + 发布到 GitHub (2026-05-02)
+
+### 范围
+
+- 重写全部历史 commit 的 author / committer 邮箱与名字
+  （`habits <1021869329@qq.com>` → `habitssss <48110386+habitssss@users.noreply.github.com>`）
+- 修改 `pyproject.toml` 中的 author 字段为 GitHub noreply 邮箱
+- 仓库 local `git config` 设置 `user.name` / `user.email` 为同一身份，
+  避免后续 commit 重新带上原邮箱
+- `gh repo create habitssss/youtube-subs-md --public --push`
+- 默认分支从 `master` 重命名为 `main`，删除远端 `master`，
+  `origin/HEAD` 重新指向 `origin/main`
+
+### 操作步骤
+
+1. `git stash` 暂存 `pyproject.toml` 修改
+2. `git filter-branch --env-filter ...` 重写 7 个历史 commit 的 author + committer
+3. 校验 `git log --format='%ae %ce'` 已无 `qq.com`
+4. `git stash pop` 恢复 + `git commit` 8 号 commit（pyproject.toml 改动）
+5. `git update-ref -d refs/original/...` 清理 filter-branch backup
+6. `gh repo create ... --public --source=. --push` 推送
+7. `git branch -m main` + `git push -u origin main` + `gh repo edit --default-branch main`
+   + `git push origin --delete master` + `git remote set-head origin -a`
+
+### 验证
+
+- 文件层面：`grep "qq.com\|1021869329"` 全空
+- git 历史：`git log --format='%ae %ce' | sort -u` 只剩 noreply 邮箱
+- GitHub：`gh repo view` 确认 `visibility=PUBLIC` / `defaultBranchRef.name=main`
+- 仓库 URL: <https://github.com/habitssss/youtube-subs-md>
+
+### 教训
+
+- 之前 7 个 commit 后只回顾了"代码进度"忘了"流程操作"，这次的邮箱改写
+  + 推送 + 分支重命名都没立即写 PROGRESS。**只要历史/远端有动作就该补记**。
+- `git filter-branch` 仍可用，但官方推荐迁到 `git filter-repo`；MVP 阶段
+  脚本一次性使用足够。
