@@ -106,5 +106,3 @@ Transcript text goes here...
 uv sync
 uv run youtube-subs-md --help
 ```
-
-任务进度记录见 [PROGRESS.md](./PROGRESS.md)。
