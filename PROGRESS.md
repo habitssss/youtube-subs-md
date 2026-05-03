@@ -245,3 +245,40 @@ Processed=2, Downloaded=2, Failed=0
 
 将 `--cookies-from-browser` 暴露为 CLI 参数；更新 README；
 可选地从 `pyproject.toml` 删除 `youtube-transcript-api` 依赖。
+
+---
+
+## Commit 7: CLI 参数 + README + 清理依赖 (2026-05-02)
+
+### 范围
+
+- `cli.py`：新增 `--cookies-from-browser` 选项（默认 `chrome`，传空字符串禁用），
+  同时传给 `list_recent_videos` 和 `fetch_video_data` / `fetch_english_transcript`
+- `pyproject.toml`：删除 `youtube-transcript-api` 依赖
+- `uv sync`：移除 8 个相关传递依赖（certifi/idna/requests/urllib3/...）
+- `README.md` 重写：增加"已知问题与前置条件"章节，覆盖
+  - Chrome 登录态前置要求
+  - macOS Keychain 弹窗
+  - 账号封禁风险
+  - IP 严重被封时的进阶方案（PO Token / 住宅代理）
+
+### 验证
+
+- `uv run youtube-subs-md --help` 输出包含 `--cookies-from-browser` 选项与说明
+- 实跑 t3dotgg `--limit 1`：成功生成 1 个 Markdown
+- 二次运行 → 正确输出 `[skip existing]`，Skipped existing=1
+
+### MVP 完成度对照规格 §13
+
+| 验收项 | 状态 |
+|---|---|
+| 通过 `uv run youtube-subs-md <channel-url>` 运行 | ✅ |
+| 默认处理最近 50 个视频 | ✅ |
+| 每个成功视频生成一个 `.md` | ✅ |
+| Markdown 不含时间戳 | ✅ |
+| 单视频失败不中断整体 | ✅ |
+| 已存在文件默认跳过 | ✅ |
+| 终端清晰 summary | ✅ |
+| 区分 manual / auto-generated | ✅ |
+
+MVP 完成。后续可考虑加 `--player-client` / `--proxy` / PO Token 等扩展。

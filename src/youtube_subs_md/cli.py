@@ -213,17 +213,27 @@ def main(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="只列出将处理的视频，不下载字幕"
     ),
+    cookies_from_browser: str = typer.Option(
+        "chrome",
+        "--cookies-from-browser",
+        help=(
+            "读取已登录 YouTube 的浏览器 Cookie，用于绕过 bot 检测。"
+            "支持 chrome / firefox / safari / edge / brave 等 yt-dlp 接受的值。"
+            "传空字符串可禁用（仅适合不触发反爬的网络）。"
+        ),
+    ),
 ) -> None:
     """主命令：下载频道最近 N 个视频的英文字幕为 Markdown。"""
     summary = RunSummary()
 
-    # commit 6: YouTube 当前对完整 extract 必须使用 cookie 才能绕过 bot 检测；
-    # 暂时硬编码为 Chrome，下一个 commit 会改成 CLI 参数。
-    cookies_from_browser = "chrome"
+    # 空字符串 → None，表示不附加 Cookie
+    cookies: str | None = cookies_from_browser.strip() or None
 
     console.print(f"[bold]Resolving:[/] {escape(url)}")
     try:
-        source, entries = videos.list_recent_videos(url, limit)
+        source, entries = videos.list_recent_videos(
+            url, limit, cookies_from_browser=cookies
+        )
     except videos.VideoListError as exc:
         console.print(f"[red]Failed to resolve URL:[/] {escape(_short_exc(exc))}")
         raise typer.Exit(code=1)
@@ -272,7 +282,7 @@ def main(
                     channel_dir,
                     overwrite,
                     summary,
-                    cookies_from_browser=cookies_from_browser,
+                    cookies_from_browser=cookies,
                 )
             except Exception as exc:
                 # 兜底：任何未预期异常都不应中断整体流程
